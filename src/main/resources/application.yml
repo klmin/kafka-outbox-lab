@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: kafka-outbox-lab
+  # 로컬 실행(bootRun) 때는 compose.yaml 의 Kafka, PostgreSQL 을 자동으로 띄우고 연결한다 (spring-boot-docker-compose)
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate # 스키마는 Flyway 가 관리한다
+  kafka:
+    producer:
+      # 브로커 쪽 중복 방지(프로듀서 재전송으로 같은 메시지가 두 번 쓰이지 않게) + 모든 ISR 기록 후 성공
+      acks: all
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: kafka-outbox-lab
+      auto-offset-reset: earliest
+      # 오프셋은 처리가 끝난 뒤에 커밋한다 (자동 커밋 끔)
+      enable-auto-commit: false
+    listener:
+      # 리스너 메서드가 정상 반환하면 그 레코드의 오프셋을 커밋한다
+      ack-mode: record
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
