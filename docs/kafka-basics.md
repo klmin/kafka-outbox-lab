@@ -277,7 +277,133 @@ spring:
 
 ---
 
-## 8. 꼭 기억할 것 (면접 단골)
+## 8. Kafka vs RabbitMQ
+
+| | Kafka | RabbitMQ |
+|---|---|---|
+| 모델 | **로그.** 읽어도 남고 보존 기간이 지나야 삭제 | **큐.** 컨슈머가 ack 하면 삭제 |
+| 가져오는 방식 | pull (컨슈머가 가져감) | push (브로커가 밀어줌, prefetch 로 조절) |
+| 다시 읽기 | 오프셋을 되돌려 재처리 가능 | 한 번 ack 하면 끝 |
+| 여러 소비자 | 그룹마다 같은 데이터를 각자 전부 읽음 | 큐를 나눠야 함(fanout exchange) |
+| 순서 | 파티션 안에서 보장 | 큐 하나, 컨슈머 하나일 때 보장 |
+| 라우팅 | key → 파티션 정도 | exchange(direct, topic, headers)로 유연한 라우팅 |
+| 메시지 단위 기능 | 약함(지연 메시지, 우선순위 없음) | 우선순위, TTL, 지연(플러그인), 메시지별 ack |
+| 처리량 | 매우 높음(초당 수십만~수백만) | 상대적으로 낮음 |
+| 어울리는 곳 | 이벤트 스트리밍, 여러 서비스가 같은 이벤트를 구독, 재처리, 로그·지표 수집 | 작업 큐, 복잡한 라우팅, 요청-응답, 메시지별 처리 보장 |
+
+- 답변 요령: "어느 게 낫다"가 아니라 **"이벤트를 여러 곳에서 다시 읽어야 하면 Kafka, 작업을 나눠 처리하고 라우팅이 복잡하면 RabbitMQ"**.
+- RabbitMQ 도 Streams 기능으로 로그형 소비를 지원하지만, 기본 사용은 큐다.
+
+---
+
+## 9. Kafka 는 왜 빠른가
+
+1. **순차 쓰기(append-only):** 파티션 끝에만 붙인다. 디스크도 순차 I/O 는 빠르다.
+2. **OS 페이지 캐시:** 데이터를 JVM 힙이 아니라 OS 캐시에 둔다. 방금 쓴 데이터를 컨슈머가 바로 읽으면 디스크를 안 거친다. GC 부담도 적다.
+3. **zero-copy(`sendfile`):** 페이지 캐시 → 소켓으로 바로 보내 사용자 공간 복사를 생략한다. (TLS 를 쓰면 암호화 때문에 적용 안 됨)
+4. **배치와 압축:** 프로듀서가 묶어서 보내고, 브로커는 압축된 배치를 그대로 저장하고, 컨슈머가 푼다.
+5. **파티션 병렬화:** 파티션마다 다른 브로커, 다른 컨슈머가 처리한다.
+6. **브로커가 단순:** 메시지별 상태(누가 읽었는지)를 브로커가 관리하지 않고 컨슈머가 오프셋만 기록한다.
+
+---
+
+## 10. 파티션 할당 전략과 리밸런싱
+
+| 전략 | 방식 | 특징 |
+|---|---|---|
+| `RangeAssignor` | 토픽별로 파티션을 연속 구간으로 나눔 | 여러 토픽을 같은 key 로 맞춰 받기 좋음. 불균형 생길 수 있음 |
+| `RoundRobinAssignor` | 전체 파티션을 돌아가며 나눔 | 균등. 리밸런싱 때 많이 바뀜 |
+| `StickyAssignor` | 균등 + 기존 할당 최대 유지 | 이동이 적음. 하지만 eager(아래) |
+| `CooperativeStickyAssignor` | sticky + **점진적(cooperative) 리밸런싱** | 옮길 파티션만 내려놓고 나머지는 계속 처리 |
+
+- **eager 리밸런싱:** 모든 컨슈머가 파티션을 전부 내려놓고 다시 받는다 → 그동안 그룹 전체 정지(stop-the-world).
+- **cooperative 리밸런싱:** 옮겨야 하는 파티션만 넘긴다 → 정지 범위가 작다.
+- **새 프로토콜(KIP-848, `group.protocol=consumer`, Kafka 4.0 GA):** 할당을 브로커(코디네이터)가 계산하고 점진적으로 적용한다. 클라이언트 assignor 대신 서버 쪽 assignor 를 쓴다.
+- **정적 멤버십(`group.instance.id`):** 컨슈머가 재시작해도 `session.timeout.ms` 안에 돌아오면 리밸런싱하지 않는다. 롤링 배포 때 유용.
+- 리밸런싱 직전에 처리한 만큼 커밋하려면 `ConsumerRebalanceListener.onPartitionsRevoked`(Spring Kafka 는 `ConsumerAwareRebalanceListener`)를 쓴다.
+
+---
+
+## 11. 메시지·이벤트 설계
+
+### 이벤트 vs 커맨드
+| | 이벤트 | 커맨드 |
+|---|---|---|
+| 의미 | **이미 일어난 일** | **해 달라는 요청** |
+| 이름 | 과거형: `OrderCreated`, `PaymentCompleted` | 명령형: `ReserveStock`, `CancelPayment` |
+| 받는 쪽 | 누가 듣든 상관없음(0~N) | 보통 특정 서비스 하나 |
+| 거절 | 못 함(이미 일어남) | 실패, 거절 응답 가능 |
+
+### 이벤트에 무엇을 담나
+- **알림형(notification):** ID 만 보냄 → 받는 쪽이 API 로 다시 조회. 작지만 조회 부하와 결합이 생김.
+- **상태 전달형(event-carried state transfer):** 필요한 데이터를 다 담음 → 받는 쪽이 독립적. 대신 크고 스키마 관리가 필요.
+- 공통 필드: `eventId`(멱등 키), `eventType`, `aggregateId`(파티션 키), `occurredAt`, `version`(스키마 버전)
+
+### 크기
+- 브로커 `message.max.bytes`, 프로듀서 `max.request.size` 기본 약 1MB.
+- 큰 데이터(파일, 이미지)는 **S3 에 두고 경로만 보낸다**(claim check 패턴). 한도를 키우는 건 마지막 수단.
+
+### 스키마 변경
+- 이미 나간 메시지와 아직 안 바뀐 컨슈머가 공존한다 → **호환성**을 지켜야 한다.
+  - 하위 호환(backward): 새 컨슈머가 옛 메시지를 읽을 수 있음
+  - 상위 호환(forward): 옛 컨슈머가 새 메시지를 읽을 수 있음
+- 안전한 변경: **선택 필드 추가.** 위험한 변경: 필드 삭제, 이름·타입 변경, 필수 필드 추가.
+- 큰 변경은 새 이벤트 타입(`OrderCreatedV2`)이나 새 토픽으로.
+- 스키마 레지스트리(Avro, Protobuf)를 쓰면 호환성 검사를 등록 시점에 강제할 수 있다.
+
+---
+
+## 12. 운영 CLI (실험할 때 바로 쓰는 것)
+
+compose 의 Kafka 컨테이너 안에서 실행한다. 스크립트 경로는 `apache/kafka` 이미지 기준 `/opt/kafka/bin`.
+
+```bash
+kt() { docker compose exec kafka /opt/kafka/bin/"$@"; }   # 예: kt kafka-topics.sh ...
+BS="--bootstrap-server localhost:9092"
+
+# 토픽
+kt kafka-topics.sh $BS --list
+kt kafka-topics.sh $BS --create --topic order-events --partitions 3 --replication-factor 1
+kt kafka-topics.sh $BS --describe --topic order-events          # 파티션별 리더, ISR
+
+# 보내기 (key:value 형식)
+kt kafka-console-producer.sh $BS --topic order-events \
+  --property parse.key=true --property key.separator=:
+
+# 받기 (처음부터, key·헤더·파티션·오프셋까지 출력)
+kt kafka-console-consumer.sh $BS --topic order-events --from-beginning \
+  --property print.key=true --property print.headers=true \
+  --property print.partition=true --property print.offset=true
+
+# 컨슈머 그룹 상태 (CURRENT-OFFSET, LOG-END-OFFSET, LAG)
+kt kafka-consumer-groups.sh $BS --list
+kt kafka-consumer-groups.sh $BS --describe --group kafka-outbox-lab
+
+# 오프셋 되돌리기 (재처리). 그룹의 컨슈머가 모두 멈춘 상태여야 한다
+kt kafka-consumer-groups.sh $BS --group kafka-outbox-lab --topic order-events \
+  --reset-offsets --to-earliest --dry-run      # 결과 미리 보기
+kt kafka-consumer-groups.sh $BS --group kafka-outbox-lab --topic order-events \
+  --reset-offsets --to-earliest --execute      # 실제 적용
+# 다른 기준: --shift-by -10, --to-offset 42, --to-datetime 2026-11-27T00:00:00.000
+```
+- Windows PowerShell 에서는 함수 대신 `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh ...` 로 그대로 쓴다.
+- 오프셋 되돌리기는 **재처리 = 중복 처리**다. 멱등 처리가 돼 있어야 안전하다.
+
+---
+
+## 13. Graceful shutdown (배포 때 메시지 처리)
+
+- 앱이 종료 신호(SIGTERM)를 받으면 Spring 이 리스너 컨테이너를 멈춘다.
+  - 기본: 지금 처리 중인 레코드(또는 배치)를 끝내고 커밋한 뒤 멈춤. `spring.kafka.listener.immediate-stop=true` 면 현재 레코드까지만.
+  - 컨테이너가 멈출 때까지 기다리는 시간은 `ContainerProperties.shutdownTimeout`(기본 10초 안팎, 확인 필요). 처리가 길면 늘린다.
+- 커밋 못 하고 죽으면 → 리밸런싱 후 다른 컨슈머가 재처리(중복). 그래서 여기서도 멱등 처리가 안전망.
+- k8s 에서는 `terminationGracePeriodSeconds` 를 종료 대기 시간보다 길게 둔다. 짧으면 처리 도중 SIGKILL.
+- 롤링 배포 때 리밸런싱이 연달아 일어나는 것을 줄이려면: cooperative 리밸런싱(또는 새 프로토콜) + 정적 멤버십.
+- 프로듀서도 종료 때 `flush` 로 버퍼에 남은 메시지를 보낸다(Spring 이 `KafkaTemplate`/프로듀서 팩토리 종료 시 처리). 비동기 전송 결과를 확인하지 않으면 종료 직전 메시지가 유실될 수 있다.
+
+---
+
+## 14. 꼭 기억할 것 (면접 단골)
 
 1. 순서는 **파티션 안에서만** 보장된다.
 2. Kafka 기본 전달은 **at-least-once.** 처리 후 커밋해도 중복은 생긴다 → 멱등 처리.
