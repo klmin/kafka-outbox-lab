@@ -3,7 +3,8 @@
 Kafka로 메시지를 **잃지 않고, 두 번 처리하지 않게** 만드는 방법을 케이스별로 직접 재현하고 검증하는 실험 저장소.
 
 - 각 케이스는 "문제 재현 테스트 → 해결 → 같은 테스트 통과 → 결과 기록" 순서로 진행한다.
-- 개념 정리: [docs/concepts.md](docs/concepts.md)
+- 기본(내부 구조, 용어, Spring Boot 설정, 상황별 사용): [docs/kafka-basics.md](docs/kafka-basics.md)
+- 패턴 정리(전달 보장, 아웃박스, 멱등, DLT): [docs/concepts.md](docs/concepts.md)
 - 케이스 목록과 기록: [docs/cases](docs/cases/README.md)
 
 ## 스택
