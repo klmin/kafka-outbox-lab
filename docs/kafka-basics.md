@@ -371,12 +371,12 @@ kt kafka-topics.sh $BS --describe --topic order-events          # 파티션별 �
 
 # 보내기 (key:value 형식)
 kt kafka-console-producer.sh $BS --topic order-events \
-  --property parse.key=true --property key.separator=:
+  --reader-property parse.key=true --reader-property key.separator=:
 
 # 받기 (처음부터, key·헤더·파티션·오프셋까지 출력)
 kt kafka-console-consumer.sh $BS --topic order-events --from-beginning \
-  --property print.key=true --property print.headers=true \
-  --property print.partition=true --property print.offset=true
+  --formatter-property print.key=true --formatter-property print.headers=true \
+  --formatter-property print.partition=true --formatter-property print.offset=true
 
 # 컨슈머 그룹 상태 (CURRENT-OFFSET, LOG-END-OFFSET, LAG)
 kt kafka-consumer-groups.sh $BS --list
@@ -389,7 +389,8 @@ kt kafka-consumer-groups.sh $BS --group kafka-outbox-lab --topic order-events \
   --reset-offsets --to-earliest --execute      # 실제 적용
 # 다른 기준: --shift-by -10, --to-offset 42, --to-datetime 2026-11-27T00:00:00.000
 ```
-- Windows PowerShell 에서는 함수 대신 `docker compose exec kafka /opt/kafka/bin/kafka-topics.sh ...` 로 그대로 쓴다.
+- Windows PowerShell 용 함수는 [케이스 00](cases/00-warmup-cli.md) 참고.
+- Kafka 4.4 에서는 콘솔 도구의 `--property` 는 deprecated. 프로듀서는 `--reader-property`, 컨슈머는 `--formatter-property`.
 - 오프셋 되돌리기는 **재처리 = 중복 처리**다. 멱등 처리가 돼 있어야 안전하다.
 
 ---
