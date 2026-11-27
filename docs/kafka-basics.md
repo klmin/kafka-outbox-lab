@@ -1,6 +1,7 @@
 # Kafka 기본: 내부 구조, 용어, Spring Boot 설정
 
 - 이 문서: Kafka 가 **어떻게 생겼고**, Spring Boot 에서 **어떻게 설정하고**, **언제 무엇을 쓰는지**.
+- 구조가 처음이면 [kafka-structure.md](kafka-structure.md) 를 먼저 본다(파티션 vs 복제, key·offset·그룹 관계, 헷갈리는 지점).
 - 패턴(아웃박스, 멱등, DLT 설계)은 [concepts.md](concepts.md), 직접 재현은 [cases](cases/README.md).
 - 기준 버전: Apache Kafka 4.4(KRaft, kafka-clients 4.4.0), Spring Boot 4.2, Spring Kafka 4.2.0. 기본값은 버전마다 바뀔 수 있다.
 - ✔ 표시는 이 저장소 의존성(jar)에서 직접 확인한 값(2026-11-27). 나머지는 케이스로 확인하면 ✔ 를 붙인다.
