@@ -2,7 +2,8 @@
 
 - 이 문서: Kafka 가 **어떻게 생겼고**, Spring Boot 에서 **어떻게 설정하고**, **언제 무엇을 쓰는지**.
 - 패턴(아웃박스, 멱등, DLT 설계)은 [concepts.md](concepts.md), 직접 재현은 [cases](cases/README.md).
-- 기준 버전: Apache Kafka 4.4(KRaft), Spring Boot 4.2, Spring Kafka 4.x. 기본값은 버전마다 바뀔 수 있으니 확인한 값은 케이스 기록에 남긴다.
+- 기준 버전: Apache Kafka 4.4(KRaft, kafka-clients 4.4.0), Spring Boot 4.2, Spring Kafka 4.2.0. 기본값은 버전마다 바뀔 수 있다.
+- ✔ 표시는 이 저장소 의존성(jar)에서 직접 확인한 값(2026-11-27). 나머지는 케이스로 확인하면 ✔ 를 붙인다.
 
 ---
 
@@ -94,11 +95,11 @@ Consumer Group "notification"  (다른 그룹은 같은 메시지를 따로 전�
 ### 중요한 설정
 | 설정 | 의미 | 권장 / 언제 |
 |---|---|---|
-| `acks` | `0`: 안 기다림, `1`: 리더만, `all`: ISR 전부 | 유실되면 안 되는 이벤트는 `all` (Kafka 3.0 부터 기본값) |
-| `enable.idempotence` | 프로듀서 재전송으로 브로커에 중복 기록되는 것 방지 + 파티션 내 순서 유지 | `true` (3.0 부터 기본). **컨슈머 쪽 중복은 못 막는다** |
+| `acks` | `0`: 안 기다림, `1`: 리더만, `all`: ISR 전부 | 유실되면 안 되는 이벤트는 `all` (✔ 기본값, Kafka 3.0 부터) |
+| `enable.idempotence` | 프로듀서 재전송으로 브로커에 중복 기록되는 것 방지 + 파티션 내 순서 유지 | `true` (✔ 기본, 3.0 부터). **컨슈머 쪽 중복은 못 막는다** |
 | `retries`, `delivery.timeout.ms` | 실패 시 재전송 횟수와 전체 제한 시간 | 기본값(무한 재시도, 2분) 유지가 보통 |
 | `max.in.flight.requests.per.connection` | 응답 안 받고 보낼 수 있는 요청 수 | 멱등 프로듀서는 5 이하여야 순서 보장 |
-| `linger.ms`, `batch.size` | 배치로 모으는 대기 시간과 크기 | 처리량↑ 지연↑ 트레이드오프 |
+| `linger.ms`, `batch.size` | 배치로 모으는 대기 시간과 크기(✔ 기본 5ms, 16KB. linger.ms 기본은 Kafka 4.0 에서 0 → 5ms) | 처리량↑ 지연↑ 트레이드오프 |
 | `compression.type` | `lz4`, `zstd` 등 | 큰 메시지, 높은 처리량일 때 |
 | `transactional.id` | Kafka 트랜잭션 사용 | read-process-write exactly-once 가 필요할 때만 |
 
@@ -116,11 +117,11 @@ Consumer Group "notification"  (다른 그룹은 같은 메시지를 따로 전�
 | `group.id` | 컨슈머 그룹 | 같은 그룹 = 나눠 읽기, 다른 그룹 = 각자 전부 읽기 |
 | `auto.offset.reset` | 커밋된 오프셋이 없을 때 시작 위치 | `earliest`(처음부터) / `latest`(지금부터). 신규 그룹이 과거 메시지를 놓치지 않으려면 `earliest` |
 | `enable.auto.commit` | 주기적으로 자동 커밋 | Spring Kafka 는 기본으로 끄고 컨테이너가 커밋한다 |
-| `max.poll.records` | 한 번에 가져올 최대 건수(기본 500) | 처리가 느리면 줄인다 |
+| `max.poll.records` | 한 번에 가져올 최대 건수(✔ 기본 500) | 처리가 느리면 줄인다 |
 | `max.poll.interval.ms` | poll 사이 최대 시간(기본 5분) | 넘으면 리밸런싱 → 중복. 처리 시간 × max.poll.records 가 이보다 작아야 함 |
-| `session.timeout.ms`, `heartbeat.interval.ms` | 컨슈머 생존 확인 | 너무 짧으면 GC 한 번에 리밸런싱 |
+| `session.timeout.ms`, `heartbeat.interval.ms` | 컨슈머 생존 확인(✔ 기본 45초, 3초) | 너무 짧으면 GC 한 번에 리밸런싱 |
 | `isolation.level` | `read_committed` 면 커밋된 트랜잭션 메시지만 읽음 | Kafka 트랜잭션 쓸 때 |
-| `group.protocol` | `classic` / `consumer`(KIP-848 새 리밸런싱 프로토콜, 4.0 GA) | 새 프로토콜은 리밸런싱 중 전체 정지가 줄어듦 |
+| `group.protocol` | `classic`(✔ 기본) / `consumer`(KIP-848 새 리밸런싱 프로토콜, 4.0 GA) | 새 프로토콜은 리밸런싱 중 전체 정지가 줄어듦 |
 
 ---
 
@@ -191,7 +192,7 @@ void on(ConsumerRecord<String, String> record, Acknowledgment ack) {
 ```java
 @Bean
 DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
-    var recoverer = new DeadLetterPublishingRecoverer(template);    // 기본: "<원래 토픽>.DLT", 같은 파티션 번호
+    var recoverer = new DeadLetterPublishingRecoverer(template);    // 기본: "<원래 토픽>-dlt"(✔ Spring Kafka 4.2. 예전 버전은 ".DLT"), 같은 파티션 번호
     var backOff = new ExponentialBackOffWithMaxRetries(3);           // 1초, 2초, 4초 … 3번 재시도
     backOff.setInitialInterval(1_000);
     var handler = new DefaultErrorHandler(recoverer, backOff);
@@ -200,8 +201,8 @@ DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
 }
 ```
 - Spring Boot 는 `CommonErrorHandler` 빈이 있으면 기본 리스너 컨테이너에 자동으로 연결한다.
-- `DefaultErrorHandler` 기본값: 백오프 없이 9번 재시도(총 10번) 후 로그만 남기고 건너뜀 → **DLT 를 안 붙이면 조용히 유실된다.**
-- 역직렬화 실패, 메시지 변환 실패 같은 예외는 기본으로 재시도하지 않는다.
+- `DefaultErrorHandler` 기본값(✔ `FixedBackOff(0, 9)`): 백오프 없이 9번 재시도(총 10번) 후 로그만 남기고 건너뜀 → **DLT 를 안 붙이면 조용히 유실된다.**
+- ✔ 기본으로 재시도하지 않는 예외: `DeserializationException`, `MessageConversionException`, `ConversionException`, `MethodArgumentResolutionException`, `NoSuchMethodException`, `ClassCastException`.
 - DLT 토픽은 원래 토픽 이상의 파티션 수가 필요하다(같은 파티션 번호로 보내기 때문).
 - 이 방식은 **블로킹 재시도**: 재시도하는 동안 그 파티션 뒤 메시지가 밀린다.
 
@@ -311,6 +312,8 @@ spring:
 
 | 전략 | 방식 | 특징 |
 |---|---|---|
+- ✔ 컨슈머 기본 `partition.assignment.strategy` 는 `[RangeAssignor, CooperativeStickyAssignor]` (classic 프로토콜 기준).
+
 | `RangeAssignor` | 토픽별로 파티션을 연속 구간으로 나눔 | 여러 토픽을 같은 key 로 맞춰 받기 좋음. 불균형 생길 수 있음 |
 | `RoundRobinAssignor` | 전체 파티션을 돌아가며 나눔 | 균등. 리밸런싱 때 많이 바뀜 |
 | `StickyAssignor` | 균등 + 기존 할당 최대 유지 | 이동이 적음. 하지만 eager(아래) |
@@ -340,7 +343,7 @@ spring:
 - 공통 필드: `eventId`(멱등 키), `eventType`, `aggregateId`(파티션 키), `occurredAt`, `version`(스키마 버전)
 
 ### 크기
-- 브로커 `message.max.bytes`, 프로듀서 `max.request.size` 기본 약 1MB.
+- 브로커 `message.max.bytes`, 프로듀서 `max.request.size` 기본 약 1MB(✔ 프로듀서 1,048,576 바이트).
 - 큰 데이터(파일, 이미지)는 **S3 에 두고 경로만 보낸다**(claim check 패턴). 한도를 키우는 건 마지막 수단.
 
 ### 스키마 변경
@@ -395,7 +398,7 @@ kt kafka-consumer-groups.sh $BS --group kafka-outbox-lab --topic order-events \
 
 - 앱이 종료 신호(SIGTERM)를 받으면 Spring 이 리스너 컨테이너를 멈춘다.
   - 기본: 지금 처리 중인 레코드(또는 배치)를 끝내고 커밋한 뒤 멈춤. `spring.kafka.listener.immediate-stop=true` 면 현재 레코드까지만.
-  - 컨테이너가 멈출 때까지 기다리는 시간은 `ContainerProperties.shutdownTimeout`(기본 10초 안팎, 확인 필요). 처리가 길면 늘린다.
+  - 컨테이너가 멈출 때까지 기다리는 시간은 `ContainerProperties.shutdownTimeout`(✔ 기본 10초). 처리가 길면 늘린다.
 - 커밋 못 하고 죽으면 → 리밸런싱 후 다른 컨슈머가 재처리(중복). 그래서 여기서도 멱등 처리가 안전망.
 - k8s 에서는 `terminationGracePeriodSeconds` 를 종료 대기 시간보다 길게 둔다. 짧으면 처리 도중 SIGKILL.
 - 롤링 배포 때 리밸런싱이 연달아 일어나는 것을 줄이려면: cooperative 리밸런싱(또는 새 프로토콜) + 정적 멤버십.
