@@ -406,7 +406,107 @@ kt kafka-consumer-groups.sh $BS --group kafka-outbox-lab --topic order-events \
 
 ---
 
-## 14. 꼭 기억할 것 (면접 단골)
+## 14. 브로커 설정과 리스너 (compose.yaml 해설)
+
+`application.yml` 은 **앱(클라이언트)** 설정, `compose.yaml` 의 `KAFKA_*` 는 **Kafka 서버(브로커)** 설정이다.
+환경변수 `KAFKA_XXX_YYY` 는 서버 설정 `xxx.yyy` 로 바뀐다 (`KAFKA_NODE_ID` → `node.id`).
+테스트는 Testcontainers `KafkaContainer` 가 비슷한 설정을 알아서 만들므로 compose.yaml 을 쓰지 않는다.
+
+### 브로커와 컨트롤러
+
+| 역할 | 하는 일 | 비유 |
+|---|---|---|
+| **Broker** | 파티션 데이터를 디스크에 저장하고, 프로듀서의 쓰기·컨슈머의 읽기를 처리하고, 다른 브로커와 복제한다 | 창고 + 창구 |
+| **Controller** | 클러스터 **메타데이터** 관리: 어떤 브로커가 살아 있는지, 토픽·파티션 목록, 파티션마다 리더와 ISR. 브로커가 죽으면 새 리더를 뽑는다 | 관리 사무소 |
+
+- 컨트롤러 여러 대가 Raft 로 합의한다(쿼럼). 그중 한 대가 active, 나머지는 대기하며 따라 적는다. 메타데이터는 내부 로그 `__cluster_metadata` 에 쌓인다.
+- 과반이 살아 있어야 동작: 3대면 1대, 5대면 2대 장애까지 견딘다. 그래서 홀수로 둔다.
+- 브로커는 컨트롤러에서 메타데이터를 받아 "내가 어느 파티션의 리더인지" 안다. 클라이언트는 컨트롤러에 직접 붙지 않는다.
+- `process.roles=broker,controller` 는 한 프로세스가 둘 다 맡는 **combined 모드**. 로컬·테스트용이고, 운영은 역할을 나눈다.
+
+### 리스너: 왜 포트가 여러 개인가
+
+이 저장소 설정:
+```yaml
+KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:9093,EXTERNAL://:9092
+KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+```
+
+한 줄씩 형식은 `이름://호스트:포트`. **이름은 임의로 짓는 라벨**이다(`INTERNAL`, `DOCKER`, `HOST` 등 아무거나).
+
+| 설정 | 뜻 |
+|---|---|
+| `listeners` | 브로커가 **실제로 여는 포트**. 프로세스 하나가 포트 3개를 연다 |
+| `advertised.listeners` | 클라이언트에게 **"앞으로 이 주소로 접속해라"** 고 알려 주는 주소 |
+| `listener.security.protocol.map` | **리스너 이름 → 보안 방식** 매핑. 이름은 라벨일 뿐이라 보안 방식을 여기서 정한다 |
+| `controller.listener.names` | 어느 리스너가 컨트롤러 통신용인지 |
+| `inter.broker.listener.name` | 브로커끼리 복제할 때 쓰는 리스너 |
+| `controller.quorum.voters` | 컨트롤러 투표 멤버 목록, `노드ID@호스트:포트` 를 쉼표로. 3대면 `1@c1:9093,2@c2:9093,3@c3:9093` |
+
+포트 3개의 용도:
+
+| 이름 | 포트 | 누가 쓰나 | 알려 주는 주소 |
+|---|---|---|---|
+| `EXTERNAL` | 9092 | 내 PC 의 Spring 앱, CLI | `localhost:9092` |
+| `PLAINTEXT` | 29092 | 같은 docker 네트워크의 컨테이너(Kafka UI), 브로커끼리 | `kafka:29092` |
+| `CONTROLLER` | 9093 | 컨트롤러 쿼럼 통신 전용. 클라이언트는 안 씀 | 알려 주지 않음 |
+
+- 9092 는 Kafka 클라이언트 포트의 관례, 9093 은 컨트롤러 포트의 관례일 뿐 정해진 값은 아니다. 호스트에는 9092 만 열었다(`ports: "9092:9092"`).
+- `1@kafka:9093` = "노드 1번 컨트롤러는 `kafka` 호스트의 9093 포트". 자기 `node.id` 가 1이니 자기 자신 하나로 쿼럼이 된다.
+
+**advertised 가 필요한 이유 (접속 2단계)**
+
+```
+1) 앱 → bootstrap-servers(localhost:9092) 로 접속, 메타데이터 요청
+2) 브로커 → "파티션 0 리더는 localhost:9092" (접속한 리스너의 advertised 주소로 답한다)
+3) 앱 → 그 주소로 다시 접속해서 produce / fetch
+```
+
+- 프로듀서, 컨슈머, AdminClient 모두 이 과정을 거친다. bootstrap 주소는 **처음 한 번 찾아가는 용도**일 뿐이다.
+- 컨테이너 안의 Kafka UI 에게 `localhost` 는 자기 자신이다. 그래서 내부용 리스너(`kafka:29092`)를 따로 둔다.
+- 흔한 장애: advertised 를 잘못 쓰면 **처음 접속은 되는데 메시지 보낼 때 타임아웃**. 2단계의 주소로 갈 수 없어서다.
+
+### 보안 방식 (security.protocol)
+
+| 값 | 암호화(TLS) | 인증 |
+|---|---|---|
+| `PLAINTEXT` | 없음(평문) | 없음 |
+| `SSL` | 있음 | 없음, 또는 클라이언트 인증서(mTLS) |
+| `SASL_PLAINTEXT` | 없음 | 있음 (SCRAM, PLAIN, OAUTHBEARER, Kerberos 등) |
+| `SASL_SSL` | 있음 | 있음 ← **운영에서 주로 씀** |
+
+- 암호화는 HTTPS 처럼 **연결(TLS) 단계**에서 클라이언트 라이브러리와 브로커가 처리한다. 앱 코드가 메시지를 직접 암호화·복호화하는 게 아니다.
+- 클라이언트는 같은 방식으로 설정만 맞춘다. 예: `spring.kafka.security.protocol=SASL_SSL`, `spring.kafka.ssl.trust-store-location`, `spring.kafka.properties.sasl.mechanism`, `sasl.jaas.config`.
+- `PLAINTEXT` 는 **리스너 이름이면서 보안 방식 이름**이라 헷갈린다. `PLAINTEXT:PLAINTEXT` 는 "PLAINTEXT 라는 이름의 리스너는 평문". 리스너 이름을 `INTERNAL` 로 바꾸면 `INTERNAL:PLAINTEXT` 가 된다.
+- 보통 리스너마다 보안을 다르게 둔다. 예: 내부망은 `SASL_PLAINTEXT`, 외부 공개는 `SASL_SSL`.
+
+### 단일 노드라서 바꾼 값
+
+| 설정 | Kafka 기본값 | 여기 값 | 이유 |
+|---|---|---|---|
+| `offsets.topic.replication.factor` | 3 | 1 | 브로커 1대라 복제본 3개를 못 만든다. 그대로 두면 컨슈머 그룹이 동작하지 않음 |
+| `transaction.state.log.replication.factor` / `.min.isr` | 3 / 2 | 1 / 1 | 같은 이유. Kafka 트랜잭션(케이스 12)용 |
+| `group.initial.rebalance.delay.ms` | 3000 | 0 | 첫 컨슈머 합류 때 3초 대기 없이 바로 시작(실험 속도) |
+| `num.partitions` | 1 | 3 | 자동 생성 토픽을 파티션 3개로. 순서(08), 리밸런싱(09) 실험용 |
+
+- `apache/kafka` 이미지는 환경변수를 안 주면 자체 기본 설정으로 뜬다. 하지만 `localhost` 로만 접속돼서 Kafka UI 컨테이너가 붙지 못한다. 환경변수를 하나라도 주면 이미지 기본 설정 대신 환경변수 기준으로 설정하므로 위 항목을 다 적는다.
+
+### 운영과 다른 점
+
+| 항목 | 이 저장소(로컬) | 운영 |
+|---|---|---|
+| 노드 | 1대, broker+controller 겸용 | 브로커 3대 이상 + 컨트롤러 3대(따로) |
+| 복제 | RF 1 | RF 3, `min.insync.replicas=2` (그래야 `acks=all` 이 "2대 이상 기록" 을 보장) |
+| 보안 | PLAINTEXT | SASL_SSL + ACL(토픽별 읽기·쓰기 권한) |
+| 토픽 | 자동 생성 허용 | `auto.create.topics.enable=false`, 명시적으로 생성 |
+
+---
+
+## 15. 꼭 기억할 것 (면접 단골)
 
 1. 순서는 **파티션 안에서만** 보장된다.
 2. Kafka 기본 전달은 **at-least-once.** 처리 후 커밋해도 중복은 생긴다 → 멱등 처리.
@@ -417,3 +517,4 @@ kt kafka-consumer-groups.sh $BS --group kafka-outbox-lab --topic order-events \
 7. 처리가 `max.poll.interval.ms` 보다 오래 걸리면 리밸런싱 → 중복.
 8. 컨슈머 수 > 파티션 수면 남는 컨슈머는 논다.
 9. **lag** 은 반드시 모니터링한다.
+10. 클라이언트는 bootstrap 후 **advertised.listeners 주소로 다시 접속**한다. 잘못 쓰면 연결은 되는데 전송이 타임아웃.
